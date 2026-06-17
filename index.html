@@ -351,6 +351,7 @@ textarea#addInput:focus { border-color:#005bd3; box-shadow:0 0 0 2px rgba(0,91,2
     </div>
     <div class="addhint" id="addHint" data-default="Paste anything — a list, or a whole email. It finds product names, Shopify links, and category headers on its own. Click Add (⌘/Ctrl+Enter works too).">Paste anything — a list, or a whole email. It finds product names, Shopify links, and category headers on its own. Click Add (⌘/Ctrl+Enter works too).</div>
     <div class="modebar">
+      <span class="modenote" id="syncPill" title="Whether this board is shared live with the team"></span>
       <span class="modenote" id="modeNote"></span>
       <button class="savebtn" id="saveBtn" title="Save now (⌘/Ctrl+S)">💾 Save</button>
       <button class="clearall" id="viewBtn" title="Switch reviewer view">👤 View: Mariel</button>
@@ -880,6 +881,13 @@ const TKEY = "sl-review-queue-trash-v1";    // recycle bin
 const NKEY = "sl-review-queue-notes-v1";    // per-section notes
 const AKEY = "sl-review-queue-aryan-v1";    // Aryan's per-section confirmations
 
+/* ===== SHARED BACKEND (live sync for the whole team) =====
+   Paste the Apps Script Web app URL (ends in /exec) between the quotes.
+   Leave it "" and the page just works locally (per-browser, like before). */
+const SYNC_URL = "https://script.google.com/a/macros/stateandliberty.com/s/AKfycbxYfwP70w452VwsU2g07GiW9NvG84ZYbG2EFk2prZg7h4TArBioKc10DItBVUX7bQh3/exec";
+let lastRev = 0, applyingRemote = false, pushTimer = null;
+function editorName(){ try { return localStorage.getItem("sl-rq-editor") || ""; } catch(e){ return ""; } }
+
 let products = load(PKEY, []);
 let checks = load(CKEY, {});
 let layout = "page";  // Page view only
@@ -896,7 +904,7 @@ let calMonth = new Date(); // month shown in the live-date calendar
 
 let lastSaveOk = true;
 function load(k, d){ try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch(e){ return d; } }
-function save(){ try { localStorage.setItem(PKEY, JSON.stringify(products)); localStorage.setItem(CKEY, JSON.stringify(checks)); localStorage.setItem(MKEY, layout); localStorage.setItem(OKEY, JSON.stringify(openState)); localStorage.setItem(LKEY, JSON.stringify(log)); localStorage.setItem(TKEY, JSON.stringify(trash)); localStorage.setItem(NKEY, JSON.stringify(notes)); localStorage.setItem(AKEY, JSON.stringify(aryanOK)); lastSaveOk = true; } catch(e){ lastSaveOk = false; } updateSaved(); }
+function save(){ try { localStorage.setItem(PKEY, JSON.stringify(products)); localStorage.setItem(CKEY, JSON.stringify(checks)); localStorage.setItem(MKEY, layout); localStorage.setItem(OKEY, JSON.stringify(openState)); localStorage.setItem(LKEY, JSON.stringify(log)); localStorage.setItem(TKEY, JSON.stringify(trash)); localStorage.setItem(NKEY, JSON.stringify(notes)); localStorage.setItem(AKEY, JSON.stringify(aryanOK)); lastSaveOk = true; } catch(e){ lastSaveOk = false; } updateSaved(); if(!applyingRemote) schedulePush(); }
 function noteKey(p, sec){ return p.id + "::sec::" + slug(sec.g); }
 function editSectionNote(p, sec){
   const k = noteKey(p, sec); const cur = notes[k] || "";
@@ -1706,6 +1714,70 @@ function editLink(p){
   save(); render();
 }
 
+/* ===== shared-backend sync ===== */
+function setSyncStatus(state){
+  const el = document.getElementById("syncPill"); if(!el) return;
+  const map = {
+    local:      ["💾 Local only (not shared yet)", "#616161"],
+    connecting: ["… connecting to shared board", "#8a6d00"],
+    saving:     ["⏳ Syncing…", "#8a6d00"],
+    ok:         ["🟢 Shared — live", "#0a7d33"],
+    off:        ["⚠ Offline — saved on this device", "#b42318"]
+  };
+  const m = map[state] || map.local;
+  el.textContent = m[0]; el.style.color = m[1];
+}
+function schedulePush(){
+  if(!SYNC_URL || applyingRemote) return;
+  setSyncStatus("saving");
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushRemote, 1200);
+}
+function pushRemote(){
+  pushTimer = null;
+  if(!SYNC_URL) return;
+  const rev = Date.now(); lastRev = rev;
+  const payload = { products, checks, log, trash, notes, aryanOK, _rev: rev, _by: editorName() };
+  fetch(SYNC_URL, { method:"POST", mode:"no-cors", headers:{ "Content-Type":"text/plain;charset=utf-8" }, body: JSON.stringify(payload) })
+    .then(() => setSyncStatus("ok"))
+    .catch(() => setSyncStatus("off"));
+}
+function applyRemote(d){
+  applyingRemote = true;
+  if(Array.isArray(d.products)) products = d.products;
+  checks = d.checks || {}; log = d.log || []; trash = d.trash || []; notes = d.notes || {}; aryanOK = d.aryanOK || {};
+  save();                 // writes localStorage cache; push is skipped while applyingRemote
+  applyingRemote = false;
+  render();
+}
+function onRemote(d){
+  setSyncStatus("ok");
+  if(!d || typeof d !== "object") return;
+  if(pushTimer) return;   // we have local edits queued — let them win, don't clobber
+  if(d._rev && d._rev !== lastRev){ lastRev = d._rev; applyRemote(d); }
+}
+function pullRemote(){
+  if(!SYNC_URL) return;
+  const cb = "__rq_cb_" + Date.now() + "_" + Math.floor(Math.random()*1e6);
+  const s = document.createElement("script");
+  function cleanup(){ try{ delete window[cb]; }catch(e){} if(s && s.parentNode) s.parentNode.removeChild(s); }
+  window[cb] = function(d){ try{ onRemote(d); }catch(e){} cleanup(); };
+  s.onerror = function(){ setSyncStatus("off"); cleanup(); };
+  s.src = SYNC_URL + (SYNC_URL.indexOf("?")<0 ? "?" : "&") + "action=get&callback=" + cb + "&t=" + Date.now();
+  document.body.appendChild(s);
+}
+function startSync(){
+  if(!SYNC_URL){ setSyncStatus("local"); return; }
+  setSyncStatus("connecting");
+  if(!editorName()){
+    const who = (prompt("Your name (so sign-offs show who did what on the shared board):","") || "").trim();
+    if(who){ try{ localStorage.setItem("sl-rq-editor", who); }catch(e){} }
+  }
+  pullRemote();
+  setInterval(pullRemote, 15000);
+  window.addEventListener("focus", pullRemote);
+}
+
 function exportQueue(){
   const data = { savedAt: nowISO(), products, checks, log, trash, notes, aryanOK };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
@@ -1815,6 +1887,7 @@ migrateSplit();
 attachLinks();
 render();          // never auto-reset/seed — use the "Load my products" button
 updateSaved();
+startSync();       // connect to the shared board if SYNC_URL is set
 </script>
 </body>
 </html>
