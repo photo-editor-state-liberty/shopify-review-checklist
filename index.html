@@ -804,12 +804,14 @@ const PHOTO_QA = ["No visible clips","No magnets","Skin tone even","No hair flya
 const ONLINE_FIELD = "Status → Shopify / Online";
 
 // req:true = must be filled (or N/A) to pass. pill:1 = Fabric Lookup. only:[...] = show for those types. col:"side" = right rail.
+const INPERSON_FIELD = "Swatch matches the photo (checked in person)";
 const SECTIONS = [
   {g:"Status", col:"side", fields:[ {n:"Status: Active", req:true} ]},
+  {g:"In-person (warehouse)", col:"side", aryanOnly:true, note:"Aryan confirms this on the physical sample at the warehouse — required before he can sign off.", fields:[ {n:INPERSON_FIELD, req:false} ]},
   {g:"Publishing", col:"side", note:"Online Store on / POS off happen at publish (confirm at Aryan sign-off).", fields:[ {n:"Publishing checked in variants", req:false},{n:"Stock checked", req:false} ]},
   {g:"Managed Markets", col:"side", fields:[ {n:"Supported in all regions (Canada)", req:true} ]},
   {g:"Product organization", col:"side", fields:[
-    {n:"Type", req:true},{n:"Vendor", req:true},{n:"Collections", req:true},{n:"Tags (size_ / color / cat-)", req:true},{n:"Theme template", req:false} ]},
+    {n:"Type", req:true},{n:"Vendor", req:true},{n:"Collections", req:true},{n:"Tags (size_ / color / cat-)", req:true},{n:"SKU", req:true},{n:"Price", req:true},{n:"Theme template", req:false} ]},
 
   {g:"Title", col:"main", kind:"title", note:"Name follows convention — e.g. “The Broadway” · descriptive name correct.", fields:[ {n:"Title / name correct", req:true} ]},
   {g:"Description", col:"main", kind:"desc", note:"Written? Reads as the right staple (casual / business)? Name correct in the copy?", fields:[ {n:"Description written & correct", req:true} ]},
@@ -1279,11 +1281,11 @@ function buildCard(p){
     const main = document.createElement("div"); main.className="pgmain";
     const side = document.createElement("div"); side.className="pgside";
     const t = productType(p);
-    SECTIONS.filter(sec => secApplies(sec, t)).forEach(sec => (sec.col==="side"?side:main).appendChild(sectionCard(p, sec)));
+    SECTIONS.filter(sec => secApplies(sec, t) && (!sec.aryanOnly || viewMode==="aryan")).forEach(sec => (sec.col==="side"?side:main).appendChild(sectionCard(p, sec)));
     grid.appendChild(main); grid.appendChild(side); body.appendChild(grid);
   } else {
     const t = productType(p);
-    SECTIONS.filter(sec => secApplies(sec, t)).forEach(sec => body.appendChild(sectionCard(p, sec)));
+    SECTIONS.filter(sec => secApplies(sec, t) && (!sec.aryanOnly || viewMode==="aryan")).forEach(sec => body.appendChild(sectionCard(p, sec)));
   }
 
   // footer — validation gate, Final Check, sign-off, per-product clear
@@ -1302,6 +1304,12 @@ function buildCard(p){
       const s = document.createElement("div"); s.className="signoff";
       s.innerHTML = `✓ Checked by ${escapeHtml(p.signoff.by)} · ${fmtTS(p.signoff.at)}` + (p.revised ? ' <span class="revtag">revised since</span>' : "");
       foot.appendChild(s);
+    } else if (fstate(p.id, INPERSON_FIELD) !== "done"){
+      const g = document.createElement("div"); g.className="blockmsg";
+      g.textContent = (viewMode === "aryan")
+        ? "👀 In-person check needed — tick “Swatch matches the photo (checked in person)” to unlock sign-off."
+        : "⏳ Waiting on Aryan’s in-person swatch check before sign-off.";
+      foot.appendChild(g);
     } else {
       const sb = document.createElement("button"); sb.type="button"; sb.className="signbtn"; sb.textContent="☑ Mark checked by Aryan";
       sb.addEventListener("click", () => signOff(p));
@@ -1746,9 +1754,11 @@ function applyRemote(d){
   applyingRemote = true;
   if(Array.isArray(d.products)) products = d.products;
   checks = d.checks || {}; log = d.log || []; trash = d.trash || []; notes = d.notes || {}; aryanOK = d.aryanOK || {};
+  const migrated = migrateSkuPrice();   // one-time grandfather of SKU/Price on already-finished products
   save();                 // writes localStorage cache; push is skipped while applyingRemote
   applyingRemote = false;
   render();
+  if(migrated) schedulePush();   // persist the grandfathering to the shared sheet
 }
 function onRemote(d){
   setSyncStatus("ok");
@@ -1883,8 +1893,25 @@ function migrateSplit(){
   });
   if (changed){ products = out; save(); }
 }
+// One-time grandfather: SKU & Price are required going forward, but products that were
+// ALREADY complete (under the pre-SKU/Price rules) stay finished — we auto-pass those two
+// for them so they don't reopen. Unfinished products now genuinely require SKU & Price.
+function migrateSkuPrice(){
+  if (notes["__skuPriceMigrated"]) return false;
+  products.forEach(p => {
+    const blockers = requiredFields(p).filter(f => f.n !== "SKU" && f.n !== "Price" && !eff(p, f));
+    if (blockers.length === 0){   // was complete before SKU/Price existed → grandfather
+      if (!fstate(p.id, "SKU"))   checks[ckey(p.id, "SKU")]   = "done";
+      if (!fstate(p.id, "Price")) checks[ckey(p.id, "Price")] = "done";
+    }
+  });
+  notes["__skuPriceMigrated"] = true;
+  return true;
+}
+
 migrateSplit();
 attachLinks();
+if (!SYNC_URL){ migrateSkuPrice(); save(); }   // local copy grandfathers now; shared copy does it after the first sync pull
 render();          // never auto-reset/seed — use the "Load my products" button
 updateSaved();
 startSync();       // connect to the shared board if SYNC_URL is set
